@@ -98,9 +98,16 @@ export function shake(target: Container, intensity = 6, duration = 0.3): void {
 }
 
 /** Scale punch (squash and stretch). Works on any display object. */
+const punchBase = new WeakMap<Container, { x: number; y: number }>();
 export function punch(target: Container, amount = 0.18, duration = 0.35): void {
-  const sx = target.scale.x;
-  const sy = target.scale.y;
+  // Re-punching mid-animation must not creep the scale: reuse the resting scale.
+  let base = punchBase.get(target);
+  if (!base || !gsap.isTweening(target.scale)) {
+    base = { x: target.scale.x, y: target.scale.y };
+    punchBase.set(target, base);
+  }
+  const sx = base.x;
+  const sy = base.y;
   gsap.killTweensOf(target.scale);
   gsap.fromTo(
     target.scale,

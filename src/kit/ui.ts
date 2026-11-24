@@ -1,6 +1,6 @@
-import { Container, Graphics, Text, TextStyle, type TextStyleOptions } from 'pixi.js';
+import { Container, Graphics, Sprite, Text, TextStyle, Texture, type TextStyleOptions } from 'pixi.js';
 import { gsap } from 'gsap';
-import { shade } from './art';
+import { shade, svgTexture } from './art';
 import { haptic } from './haptics';
 import { isMuted, setMuted, sfx } from './sfx';
 
@@ -200,7 +200,8 @@ export interface ResultOpts {
  */
 export function showResult(parent: Container, width: number, height: number, o: ResultOpts): Container {
   const layer = new Container();
-  const dim = new Graphics().rect(0, 0, width, height).fill({ color: 0x1b1530, alpha: 0.55 });
+  // Overscan the dim so it also covers the letterbox on wide or short windows.
+  const dim = new Graphics().rect(-1000, -1000, width + 2000, height + 2000).fill({ color: 0x1b1530, alpha: 0.55 });
   dim.eventMode = 'static';
   dim.alpha = 0;
   layer.addChild(dim);
@@ -214,6 +215,9 @@ export function showResult(parent: Container, width: number, height: number, o: 
   const title = text(o.title, 30, 0xffffff, 700, { stroke: shade(accent, -0.35), strokeWidth: 5 });
   title.anchor.set(0.5);
   title.y = 43;
+  // Long titles shrink to fit inside the card's title strip.
+  const maxTitle = 316 - 36;
+  if (title.width > maxTitle) title.scale.set(maxTitle / title.width);
   content.addChild(title);
 
   let y = 110;
@@ -327,25 +331,35 @@ export class Hint extends Container {
 }
 
 /** Animated tapping finger used to teach the first move. Call .destroy() to remove. */
+const HAND_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 78">
+<g stroke="#3d3a50" stroke-width="3" stroke-linejoin="round" stroke-linecap="round">
+<path d="M15 9 a7 7 0 0 1 14 0 V36 c2-3 11-3 12 2 c2-3 10-2 11 3 c3-2 8 0 8 5 V58 c0 11-9 18-20 18 H28 c-8 0-12-4-16-10 L3 50 c-3-4 1-10 6-7 l6 5 Z" fill="#ffffff"/>
+<path d="M29 37 V46 M41 39 V47 M52 44 V50" fill="none" stroke-width="2.4" opacity=".55"/>
+</g>
+<path d="M18 10 a4 4 0 0 1 8 0" fill="none" stroke="#e9e4f3" stroke-width="3" stroke-linecap="round"/>
+<ellipse cx="44" cy="64" rx="9" ry="6" fill="#efeaf7"/>
+</svg>`;
+
 export class TapHand extends Container {
   private tl: gsap.core.Timeline;
   constructor(x: number, y: number) {
     super();
     const ripple = new Graphics().circle(0, 0, 18).stroke({ width: 3, color: 0xffffff, alpha: 0.9 });
-    const hand = new Graphics();
-    // Simple cartoon pointing hand: finger + palm, white with a dark outline.
-    const o = { width: 2.5, color: 0x3d3a50, join: 'round' as const };
-    hand.roundRect(-5, 0, 10, 26, 5).fill(0xffffff).stroke(o);
-    hand.roundRect(-11, 18, 26, 24, 10).fill(0xffffff).stroke(o);
-    hand.roundRect(-5, 0, 10, 20, 5).fill(0xffffff);
-    hand.position.set(4, 6);
+    // Cartoon pointing hand (SVG). The fingertip sits at the sprite's anchor so the
+    // hand's position is exactly where it taps.
+    const hand = new Sprite(Texture.EMPTY);
+    hand.anchor.set(22 / 60, 5 / 78);
+    void svgTexture('kit:taphand', HAND_SVG, 60, 78).then((t) => {
+      if (!hand.destroyed) hand.texture = t;
+    });
+    hand.position.set(0, 2);
     this.addChild(ripple, hand);
     this.position.set(x, y);
     this.eventMode = 'none';
     ripple.alpha = 0;
     this.tl = gsap.timeline({ repeat: -1, repeatDelay: 0.4 });
     this.tl
-      .fromTo(hand, { x: 18, y: 26 }, { x: 4, y: 6, duration: 0.45, ease: 'power2.out' })
+      .fromTo(hand, { x: 14, y: 24 }, { x: 0, y: 2, duration: 0.45, ease: 'power2.out' })
       .to(hand.scale, { x: 0.9, y: 0.9, duration: 0.1 })
       .fromTo(ripple.scale, { x: 0.4, y: 0.4 }, { x: 1.4, y: 1.4, duration: 0.45 }, '<')
       .fromTo(ripple, { alpha: 1 }, { alpha: 0, duration: 0.45 }, '<')

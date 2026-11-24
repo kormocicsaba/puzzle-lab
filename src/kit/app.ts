@@ -12,6 +12,23 @@ import { unlockAudio } from './sfx';
  * phones; on wide screens (desktop) the board stays phone-shaped and centred.
  */
 export const W = 390;
+
+/**
+ * Safety net: kill any GSAP tween on a display object (and its points) when it is
+ * destroyed. Pixi 8 nulls `_position`/`_scale` on destroy, so a tween still running
+ * on a removed sprite would otherwise throw every frame.
+ */
+const baseDestroy = Container.prototype.destroy;
+Container.prototype.destroy = function (this: Container, options?: Parameters<Container['destroy']>[0]) {
+  if (!this.destroyed) {
+    gsap.killTweensOf(this);
+    gsap.killTweensOf(this.scale);
+    gsap.killTweensOf(this.pivot);
+    gsap.killTweensOf(this.position);
+    gsap.killTweensOf(this.skew);
+  }
+  baseDestroy.call(this, options);
+};
 export const MIN_H = 720;
 export const MAX_H = 900;
 
