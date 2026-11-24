@@ -4,6 +4,10 @@
  * The box is a grid seen from the front: x grows to the right, y grows DOWN the screen,
  * row `rows - 1` stands on the box floor. Gravity points down, so "above" means a smaller y.
  *
+ * Gravity: a dropped item falls straight down from where it is let go until it rests on the
+ * floor or on another item (it can be slid into a gap under an overhang). Lifting an item out
+ * lets whatever rested on it fall (`settle`).
+ *
  * Rules (checked when an item is dropped, and again for the final state):
  * - every cell inside the box, no overlap;
  * - fragile: no other item anywhere above a fragile item in the same column;
@@ -250,13 +254,109 @@ export function filledCells(puz: Puzzle, placements: readonly (Placement | null)
   return n;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Gravity
+
+/** Can these cells sit `dy` rows lower? Cells above the box (y < 0) are open air. */
+function freeAt(puz: Puzzle, g: Int16Array, cells: readonly Cell[], dy: number): boolean {
+  for (const [x, y0] of cells) {
+    const y = y0 + dy;
+    if (x < 0 || x >= puz.cols || y >= puz.rows) return false;
+    if (y >= 0 && g[y * puz.cols + x] >= 0) return false;
+  }
+  return true;
+}
+
 /**
- * An order to drop a finished arrangement in that passes canPlace at every step: lowest items
- * first (a heavy item's support always reaches lower than the item itself).
+ * Where item `idx` comes to rest when let go at `p`. If `p` overlaps something it is lifted
+ * just clear of it first (so letting go over a stack puts the item on top). The result may
+ * stick out above the box (y < 0): canPlace then says 'bounds'. Null if the column is unusable.
  */
-export function dropOrder(puz: Puzzle, solution: readonly Placement[]): number[] {
-  const bottom = solution.map((p, i) => Math.max(...cellsAt(puz.pieces[i], p).map((c) => c[1])));
-  return solution.map((_, i) => i).sort((a, b) => bottom[b] - bottom[a] || a - b);
+export function dropFrom(puz: Puzzle, placements: readonly (Placement | null)[], idx: number, p: Placement): Placement | null {
+  const shape = orient(puz.pieces[idx].cells, p.r);
+  const { w, h } = dims(shape);
+  if (p.x < 0 || p.x + w > puz.cols) return null;
+  const g = buildGrid(puz, placements, idx);
+  const cells = shape.map(([x, y]) => [x + p.x, y] as Cell);
+  let y = Math.min(p.y, puz.rows - h);
+  while (!freeAt(puz, g, cells, y)) {
+    y--;
+    if (y < -h) return null;
+  }
+  while (freeAt(puz, g, cells, y + 1)) y++;
+  return { x: p.x, y, r: p.r };
+}
+
+/** Does item `idx` rest on the floor or on another item where it is? */
+export function isSupported(puz: Puzzle, placements: readonly (Placement | null)[], idx: number): boolean {
+  const p = placements[idx];
+  if (!p) return false;
+  const g = buildGrid(puz, placements, idx);
+  return !freeAt(puz, g, cellsAt(puz.pieces[idx], p), 1);
+}
+
+export interface Fall {
+  idx: number;
+  from: Placement;
+  to: Placement;
+}
+
+/**
+ * Let everything fall until nothing can move (after an item was lifted out). Items drop one at
+ * a time, lowest first, and the pass repeats until stable. Returns the new state and the falls.
+ */
+export function settle(puz: Puzzle, placements: readonly (Placement | null)[]): { placements: (Placement | null)[]; falls: Fall[] } {
+  const state = placements.map((p) => (p ? { ...p } : null));
+  const start = placements.map((p) => (p ? { ...p } : null));
+  const moved = new Set<number>();
+  for (let guard = 0; guard < 200; guard++) {
+    const order = state
+      .map((p, i) => (p ? i : -1))
+      .filter((i) => i >= 0)
+      .sort((a, b) => bottomOf(puz, state, b) - bottomOf(puz, state, a) || a - b);
+    let changed = false;
+    for (const i of order) {
+      const p = state[i]!;
+      const to = dropFrom(puz, state, i, p);
+      if (to && to.y > p.y) {
+        state[i] = to;
+        moved.add(i);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const falls = [...moved].map((idx) => ({ idx, from: start[idx]!, to: state[idx]! }));
+  return { placements: state, falls };
+}
+
+function bottomOf(puz: Puzzle, state: readonly (Placement | null)[], i: number): number {
+  return Math.max(...cellsAt(puz.pieces[i], state[i]!).map((c) => c[1]));
+}
+
+/**
+ * An order to drop a finished arrangement in, one item at a time, so that each item lands
+ * exactly on its spot (something already holds it up) and passes canPlace. Null when the
+ * arrangement can't be built under gravity (an item would hang in the air).
+ */
+export function buildOrder(puz: Puzzle, solution: readonly Placement[], start?: readonly (Placement | null)[]): number[] | null {
+  const state: (Placement | null)[] = start ? start.map((p) => (p ? { ...p } : null)) : solution.map(() => null);
+  const left = solution
+    .map((_, i) => i)
+    .filter((i) => !state[i])
+    .sort((a, b) => bottomOf(puz, solution, b) - bottomOf(puz, solution, a) || a - b);
+  const order: number[] = [];
+  while (left.length) {
+    const k = left.findIndex((i) => {
+      const to = dropFrom(puz, state, i, solution[i]);
+      return !!to && to.y === solution[i].y && canPlace(puz, state, i, solution[i]).ok;
+    });
+    if (k < 0) return null;
+    const i = left.splice(k, 1)[0];
+    state[i] = solution[i];
+    order.push(i);
+  }
+  return order;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -282,7 +382,8 @@ interface Orient {
 
 /**
  * Backtracking exact cover, scanning cells bottom-up, left to right. Every rule is checked
- * incrementally against whatever is already decided, which makes the final state valid.
+ * incrementally against whatever is already decided, which makes the final state valid; each
+ * full packing must also be buildable under gravity (`buildOrder`).
  */
 export function solve(
   puz: Puzzle,
@@ -402,7 +503,8 @@ export function solve(
     if (remaining === 0) {
       // Everything placed: the rest must be spare (counts were checked up front).
       const final = result as Placement[];
-      if (violations(puz, final).length === 0) {
+      // Fixed items are the player's own (already resting), so build on top of them.
+      if (violations(puz, final).length === 0 && buildOrder(puz, final, opts.fixed) !== null) {
         count++;
         if (!first) first = final.map((p) => ({ ...p }));
         if (count >= limit) aborted = true;

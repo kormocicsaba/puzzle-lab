@@ -110,7 +110,7 @@ export const LEVELS: LevelDef[] = [
     cols: 4,
     rows: 3,
     items: ['rug', 'backpack', 'shoes', 'shoes'],
-    intro: 'Drag everything into the box',
+    intro: 'Drop everything into the box',
     solution: [[0,2,0],[0,0,0],[2,0,0],[2,1,0]],
   },
   {

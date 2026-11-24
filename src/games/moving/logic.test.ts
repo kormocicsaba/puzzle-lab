@@ -2,12 +2,12 @@
  * Moving Day level check. Run with: node src/games/moving/logic.test.ts
  *
  * For every room: the stored solution must be a full, rule-abiding packing that can also be
- * dropped in one item at a time (lowest first) without canPlace ever saying no. Then the solver
+ * dropped in one item at a time under gravity (each item lands right on its spot). Then the solver
  * counts the distinct packings (identical items swapped count once) so the difficulty curve is
  * visible: lots of answers early, few late. Rotation rooms also report the count with turning
  * switched off, and the rotation intro must be impossible without turning.
  */
-import { canPlace, dropOrder, isSolved, solve, violations, type Placement } from './logic.ts';
+import { buildOrder, isSolved, settle, solve, violations } from './logic.ts';
 import { KINDS, LEVELS, kindOf, puzzleOf, solutionOf } from './levels.ts';
 
 const CAP = 500;
@@ -44,16 +44,10 @@ LEVELS.forEach((level, li) => {
   } else {
     if (!level.rotate) check(name, sol.every((p) => p.r === 0), 'turned item in a room without rotation');
     check(name, isSolved(puz, sol), `stored solution breaks a rule ${JSON.stringify(violations(puz, sol))}`);
-    // Drop it in one item at a time, the way a player (or the hint) would.
-    const state: (Placement | null)[] = puz.pieces.map(() => null);
-    for (const i of dropOrder(puz, sol)) {
-      const c = canPlace(puz, state, i, sol[i]);
-      if (!c.ok) {
-        fail(`${name}: dropping ${puz.pieces[i].kind} at ${JSON.stringify(sol[i])} refused (${c.reason})`);
-        break;
-      }
-      state[i] = sol[i];
-    }
+    // Drop it in one item at a time, the way a player (or the hint) would: every item must
+    // land exactly on its spot, so nothing in the answer hangs in the air.
+    check(name, buildOrder(puz, sol) !== null, 'stored solution can’t be dropped in under gravity');
+    check(name, settle(puz, sol).falls.length === 0, 'something in the stored solution would fall');
   }
 
   // 2. Difficulty: how many packings exist?

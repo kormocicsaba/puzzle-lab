@@ -38,7 +38,10 @@ import {
   canPlace,
   cellsAt,
   dims,
+  dropFrom,
+  isSupported,
   orient,
+  settle,
   solve,
   violations,
   type Cell,
@@ -901,7 +904,10 @@ function bumpIdle(): void {
 // Ghost preview and rule feedback
 
 interface Cand {
+  /** Where the item comes to rest. */
   p: Placement;
+  /** Where it was let go (it falls from here to `p`). */
+  release: Placement;
   ok: boolean;
   key: string;
 }
@@ -912,12 +918,21 @@ function candidateFor(it: Item): Cand | null {
   const g = boxC.toLocal(it.view.getGlobalPosition());
   const { cols, rows } = level;
   const m = c * 0.55;
-  if (g.x < bx - m || g.x > bx + cols * c + m || g.y < by - m || g.y > by + rows * c + m) return null;
+  // Above the box counts too: let go over a column and the item drops in.
+  const above = c * 3.2;
+  if (g.x < bx - m || g.x > bx + cols * c + m || g.y < by - above || g.y > by + rows * c + m) return null;
   const { w, h } = dims(shapeOf(it.idx));
   const x = Math.max(0, Math.min(cols - w, Math.round((g.x - bx) / c - w / 2)));
-  const y = Math.max(0, Math.min(rows - h, Math.round((g.y - by) / c - h / 2)));
-  const p = { x, y, r: rot[it.idx] };
-  return { p, ok: canPlace(puz, placements, it.idx, p).ok, key: `${x},${y},${p.r}` };
+  const y = Math.max(-h, Math.min(rows - h, Math.round((g.y - by) / c - h / 2)));
+  const release = { x, y, r: rot[it.idx] };
+  const p = dropFrom(puz, placements, it.idx, release);
+  if (!p) return null;
+  return { p, release, ok: canPlace(puz, placements, it.idx, p).ok, key: `${p.x},${p.y},${p.r}` };
+}
+
+/** Seconds to fall `px` points: a short drop is quick, a long one picks up speed. */
+function fallTime(px: number): number {
+  return Math.min(0.48, Math.max(0.09, Math.sqrt(Math.max(0, px) / (c * 36))));
 }
 
 /** Is placed item j directly or further below the candidate cells (same column)? */
@@ -938,7 +953,19 @@ function drawGhost(it: Item, cand: Cand | null): void {
   const chk = canPlace(puz, placements, it.idx, cand.p);
   const fill = chk.ok ? OK_FILL : BAD_FILL;
   const line = chk.ok ? OK_LINE : BAD_LINE;
-  for (const [x, y] of cellsAt(puz.pieces[it.idx], cand.p)) {
+  const landing = cellsAt(puz.pieces[it.idx], cand.p);
+  // Drop guide: a soft strip in each column from where it's let go down to where it lands.
+  const fall = cand.p.y - cand.release.y;
+  if (fall > 0) {
+    const tops = new Map<number, number>();
+    for (const [x, y] of landing) tops.set(x, Math.min(tops.get(x) ?? Infinity, y));
+    for (const [x, y] of tops) {
+      const y0 = Math.max(by, by + (y - fall) * c);
+      const y1 = by + y * c;
+      if (y1 - y0 > 4) ghostG.roundRect(bx + x * c + c * 0.3, y0, c * 0.4, y1 - y0, c * 0.2).fill({ color: 0xffffff, alpha: 0.22 });
+    }
+  }
+  for (const [x, y] of landing) {
     ghostG
       .roundRect(bx + x * c + 3, by + y * c + 3, c - 6, c - 6, c * 0.16)
       .fill({ color: fill, alpha: 0.38 })
@@ -968,7 +995,11 @@ function drawGhost(it: Item, cand: Cand | null): void {
     if (pillMsg && pillMsg !== intro) hidePill();
     return;
   }
-  if (chk.reason === 'fragile') {
+  if (chk.reason === 'bounds') {
+    sfx.bump();
+    haptic.light();
+    showPill('Too tall for that spot, it sticks out of the box', true);
+  } else if (chk.reason === 'fragile') {
     const onGlass = chk.culprits.some((j) => items[j].fragile && isBelow(j, cand.p, it.idx));
     for (const j of chk.culprits) wobble(items[j], 0.16);
     if (!onGlass) wobble(it, 0.16);
@@ -1033,6 +1064,8 @@ interface Drag {
   offY: number;
   lift: { v: number };
   vx: number;
+  /** Did lifting this item let other things fall? */
+  fell: boolean;
 }
 
 let drag: Drag | null = null;
@@ -1063,6 +1096,7 @@ function onItemDown(it: Item, e: FederatedPointerEvent): void {
     offY: 0,
     lift: { v: 0 },
     vx: 0,
+    fell: false,
   };
   gsap.to(it.wig.scale, { x: 0.94, y: 0.94, duration: 0.08 });
   bumpIdle();
@@ -1079,6 +1113,8 @@ function beginDrag(d: Drag, e: FederatedPointerEvent): void {
   stopDemo();
   placements[it.idx] = null;
   reparent(it.view, dragLayer);
+  // Whatever rested on it drops down into the gap.
+  if (d.from) d.fell = applySettle() > 0;
   const s0 = it.view.scale.x;
   const s1 = 1.06;
   d.offX = ((it.view.x - d.lx) * s1) / s0;
@@ -1135,7 +1171,7 @@ function endDrag(d: Drag): void {
   ghostG.clear();
   lastCandKey = '';
   if (cand && cand.ok) {
-    const same = d.from && d.from.x === cand.p.x && d.from.y === cand.p.y && d.from.r === cand.p.r;
+    const same = !d.fell && d.from && d.from.x === cand.p.x && d.from.y === cand.p.y && d.from.r === cand.p.r;
     if (!same) {
       pushUndo(d.snap);
       moves++;
@@ -1145,13 +1181,19 @@ function endDrag(d: Drag): void {
     flyIntoBox(it, cand.p, !same);
     return;
   }
-  if (cand && d.from) {
-    // Not allowed here: hop back to its old spot in the box, facing the way it was.
-    placements[it.idx] = d.from;
-    rot[it.idx] = d.from.r;
+  const home = d.from;
+  if (cand && home && canPlace(puz, placements, it.idx, home).ok && dropFrom(puz, placements, it.idx, home)?.y === home.y) {
+    // Not allowed here: hop back to its old spot in the box (if nothing fell into it), facing the way it was.
+    if (d.fell) {
+      // Things fell while it was out, so the box did change: keep that undoable.
+      pushUndo(d.snap);
+      moves++;
+    }
+    placements[it.idx] = home;
+    rot[it.idx] = home.r;
     syncTurn(it, true);
     reparent(it.view, placedLayer);
-    const { x, y } = boxCentre(it.idx, d.from);
+    const { x, y } = boxCentre(it.idx, home);
     gsap.to(it.view, { x, y, duration: 0.3, ease: 'back.out(1.6)' });
     gsap.to(it.view.scale, { x: 1, y: 1, duration: 0.25 });
     shadowMode(it, 'box');
@@ -1243,15 +1285,23 @@ function flyIntoBox(it: Item, p: Placement, counted: boolean, fromHint = false):
   const { x, y } = boxCentre(it.idx, p);
   gsap.killTweensOf(it.view);
   gsap.killTweensOf(it.view.scale);
-  const dur = fromHint ? 0.45 : 0.12;
-  gsap.to(it.view.scale, { x: 1, y: 1, duration: dur, ease: 'power2.out' });
-  gsap.to(it.view, {
-    x,
-    y,
-    duration: dur,
-    ease: fromHint ? 'power3.inOut' : 'power2.in',
-    onComplete: () => land(it, counted || fromHint),
-  });
+  const done = () => land(it, counted || fromHint);
+  if (fromHint) {
+    // Glide over its column, hang there a beat, then let go.
+    const { h } = dims(shapeOf(it.idx));
+    const top = Math.min(it.view.y, by - (h * c) / 2 - c * 0.35);
+    gsap.to(it.view.scale, { x: 1, y: 1, duration: 0.45, ease: 'power2.out' });
+    gsap
+      .timeline()
+      .to(it.view, { x, y: top, duration: 0.45, ease: 'power3.inOut' })
+      .to(it.view, { y, duration: fallTime(y - top), ease: 'power2.in', onComplete: done }, '+=0.08');
+  } else {
+    // Snap over the column, then fall: the longer the drop, the faster it lands.
+    const dy = y - it.view.y;
+    gsap.to(it.view.scale, { x: 1, y: 1, duration: 0.12, ease: 'power2.out' });
+    gsap.to(it.view, { x, duration: 0.09, ease: 'power2.out' });
+    gsap.to(it.view, { y, duration: dy > 0 ? fallTime(dy) : 0.12, ease: dy > 0 ? 'power2.in' : 'power2.out', onComplete: done });
+  }
   shadowMode(it, 'box');
   drawWarnings();
   updateMeter();
@@ -1309,6 +1359,41 @@ function land(it: Item, counted: boolean): void {
   refreshFullRows();
 }
 
+/** Let whatever lost its support fall, each landing with its own thud. Returns how many fell. */
+function applySettle(): number {
+  const { placements: next, falls } = settle(puz, placements);
+  if (!falls.length) return 0;
+  placements = next;
+  falls
+    .sort((a, b) => b.to.y - a.to.y)
+    .forEach((f, k) => {
+      const it = items[f.idx];
+      const { x, y } = boxCentre(f.idx, f.to);
+      gsap.killTweensOf(it.view);
+      gsap.to(it.view, {
+        x,
+        y,
+        duration: fallTime(y - it.view.y),
+        delay: 0.03 + k * 0.04,
+        ease: 'power2.in',
+        onComplete: () => land(it, false),
+      });
+    });
+  refreshFullRows();
+  drawWarnings();
+  updateMeter();
+  const bad = violations(puz, placements);
+  if (bad.length) {
+    for (const v of bad) gsap.delayedCall(0.3, () => wobble(items[v.idx], 0.16));
+    const glass = bad.some((v) => v.reason === 'fragile');
+    gsap.delayedCall(0.25, () => {
+      if (glass) snd.tinkle();
+      showPill(glass ? 'Uh-oh, something fell onto the glass' : 'Something heavy fell onto a light thing', true);
+    });
+  }
+  return falls.length;
+}
+
 function refreshFullRows(): void {
   rowWasFull.clear();
   const g = buildGrid(puz, placements);
@@ -1358,8 +1443,12 @@ function onTap(it: Item): void {
     [1, -1],
   ]) {
     const q = { x: x0 + dx, y: y0 + dy, r: nr };
-    if (canPlace(puz, placements, it.idx, q).ok) {
-      found = q;
+    const raw = canPlace(puz, placements, it.idx, q);
+    if (!raw.ok && (raw.reason === 'overlap' || raw.reason === 'bounds')) continue;
+    // Turned, it may drop a little to rest on what's below.
+    const to = dropFrom(puz, placements, it.idx, q);
+    if (to && canPlace(puz, placements, it.idx, to).ok) {
+      found = to;
       break;
     }
   }
@@ -1383,6 +1472,7 @@ function onTap(it: Item): void {
   const { x, y } = boxCentre(it.idx, found);
   gsap.to(it.view, { x, y, duration: 0.22, ease: 'back.out(1.6)' });
   dismissTurnDemo();
+  applySettle();
   drawWarnings();
   refreshFullRows();
   updateMeter();
@@ -1442,7 +1532,10 @@ function useHint(): void {
   // Lowest first, the way a person packs: whatever goes on the floor of the box.
   const pick = (target: Placement[]): number => {
     const order = missing().sort((a, b) => bottomRow(b, target[b]) - bottomRow(a, target[a]) || a - b);
-    return order.find((i) => canPlace(puz, placements, i, target[i]).ok) ?? -1;
+    return (
+      order.find((i) => canPlace(puz, placements, i, target[i]).ok && dropFrom(puz, placements, i, target[i])?.y === target[i].y) ??
+      -1
+    );
   };
   const before = snapshot();
   // 1. Keep the player's arrangement if it can still be finished.
@@ -1456,9 +1549,11 @@ function useHint(): void {
     const sol = target;
     placements = placements.map((p, i) => (p && p.x === sol[i].x && p.y === sol[i].y && p.r === sol[i].r ? p : null));
     for (let guard = 0; guard < 20; guard++) {
-      const bad = violations(puz, placements);
-      if (!bad.length) break;
-      for (const v of bad) placements[v.idx] = null;
+      // Out with rule breakers and with anything that would be left hanging in the air.
+      const bad = violations(puz, placements).map((v) => v.idx);
+      const loose = placements.map((q, i) => (q && !isSupported(puz, placements, i) ? i : -1)).filter((i) => i >= 0);
+      if (!bad.length && !loose.length) break;
+      for (const i of [...bad, ...loose]) placements[i] = null;
     }
     cleared = placements.some((p, i) => !p && before.placements[i]);
     idx = pick(target);
@@ -1527,6 +1622,8 @@ function startDragDemo(): void {
   const from = fxLayer.toLocal(it.view.getGlobalPosition());
   const toBox = boxCentre(idx, sol[idx]);
   const to = toFx(boxC, toBox.x, toBox.y);
+  const { h } = dims(orient(puz.pieces[idx].cells, sol[idx].r));
+  const over = toFx(boxC, toBox.x, by - (h * c) / 2 - c * 0.5);
   const hand = new TapHand(from.x, from.y);
   hand.alpha = 0;
   fxLayer.addChild(ghost, hand);
@@ -1535,8 +1632,13 @@ function startDragDemo(): void {
     .set(ghost.scale, { x: trayScaleNow, y: trayScaleNow })
     .to(hand, { alpha: 1, duration: 0.25 })
     .to(ghost, { alpha: 0.6, duration: 0.2 }, '+=0.45')
-    .to([ghost, hand], { x: to.x, y: to.y, duration: 1.1, ease: 'power2.inOut' })
-    .to(ghost.scale, { x: 1, y: 1, duration: 1.1, ease: 'power2.inOut' }, '<')
+    .to([ghost, hand], { x: over.x, y: over.y, duration: 1.0, ease: 'power2.inOut' })
+    .to(ghost.scale, { x: 1, y: 1, duration: 1.0, ease: 'power2.inOut' }, '<')
+    // Let go: the hand stays, the item drops into the box.
+    .to(hand, { y: over.y - 10, duration: 0.18, ease: 'power2.out' }, '+=0.2')
+    .to(ghost, { y: to.y, duration: 0.34, ease: 'power2.in' }, '<')
+    .to(ghost.scale, { x: 1.12, y: 0.88, duration: 0.06 })
+    .to(ghost.scale, { x: 1, y: 1, duration: 0.3, ease: 'elastic.out(1.1, 0.4)' })
     .to([ghost, hand], { alpha: 0, duration: 0.3 }, '+=0.4');
   demo = { hand, ghost, tl };
 }

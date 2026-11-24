@@ -1,12 +1,22 @@
 # Puzzle Lab
 
+**Play it on your phone: https://kormocicsaba.github.io/puzzle-lab/** (sound on)
+
 Three polished web demos used to find out which mobile puzzle idea is the most fun:
 
 | Game | Page | Idea |
 |---|---|---|
 | Sushi Loop | `sushi.html` | Conveyor flow: seat diners, they grab plates off a moving belt; stools are the pressure |
 | Duckling Dash | `ducks.html` | Arrow escape: tap a duck, it swims straight off the pond; bumps cost hearts |
-| Moving Day | `moving.html` | Side-view packing: drag household items into a moving box, gravity, fragile on top |
+| Moving Day | `moving.html` | Side-view packing: drop household items into a moving box; they fall until they land, fragile on top |
+
+### Gravity in Moving Day
+
+An item you let go of falls straight down from where you released it and stops on the first thing below it
+(a faint guide shows where it will land). Letting go over a stack puts the item on top; letting go inside a
+pocket under an overhang slides it in. Pulling an item out makes whatever rested on it fall. An item that
+would stick out of the top of the box can't go there. Every room is checked by `logic.test.ts` to be
+buildable in some drop order, not just to have a valid final layout.
 
 ## Stack
 
@@ -20,6 +30,8 @@ npm run dev        # http://localhost:5190 (hub) · /sushi.html · /ducks.html �
 npm run typecheck
 npm run build      # static site in dist/, relative paths, host anywhere
 ```
+
+Every push to `main` builds the site and deploys it to GitHub Pages (`.github/workflows/pages.yml`).
 
 Pure game logic lives in `src/games/<id>/logic.ts` (no Pixi imports) and is tested with Node's built-in
 type stripping: `node src/games/<id>/logic.test.ts`.
